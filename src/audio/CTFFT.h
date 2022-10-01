@@ -1,4 +1,7 @@
 /*
+ * CTFFT - Compile Time FFT
+ * Mimir Reynisson
+ *
  * Derivative work based on FFmpeg.
  *
  * CTFFT is free software; you can redistribute it and/or
