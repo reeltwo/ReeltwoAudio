@@ -1,0 +1,30 @@
+{
+  "name": "ReeltwoAudio",
+  "version": "23.5.6",
+  "description": "Modular RSeries Astromech Audio Firmware",
+  "keywords": ["audio", "i2s", "esp32", "mp3", "aac"],
+  "authors": [
+    {"name": "various"},
+    {"name": "rimim", "maintainer": true}
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/reeltwo/ReeltwoAudio.git"
+  },
+  "license": "LGPL-2.1",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "srcDir": "src"
+  },
+  "dependencies": [
+    {"name": "SPI"},
+    {"name": "SD"},
+    {"name": "SD_MMC"},
+    {"name": "FS"},
+    {"name": "SPIFFS"},
+    {"name": "FFat"},
+    {"name": "WiFi"},
+    {"name": "WiFiClientSecure"}
+  ]
+}

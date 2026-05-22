@@ -17,10 +17,16 @@
 #include "base64.h"
 #include "SPI.h"
 #include "SD.h"
+#if __has_include("SD_MMC.h")
 #include "SD_MMC.h"
+#endif
+#if __has_include("SPIFFS.h")
 #include "SPIFFS.h"
+#endif
 #include "FS.h"
+#if __has_include("FFat.h")
 #include "FFat.h"
+#endif
 #include "WiFiClient.h"
 #include "WiFiClientSecure.h"
 #include "esp_idf_version.h"
