@@ -133,21 +133,22 @@ uint32_t AudioBuffer::getReadPos() {
 //---------------------------------------------------------------------------------------------------------------------
 AudioPlayer::AudioPlayer() {
     clientsecure.setInsecure();  // if that can't be resolved update to ESP32 Arduino version 1.0.5-rc05 or higher
-    //i2s configuration
-    m_i2s_num = I2S_NUM_0; // i2s port number
+    m_i2s_num = 0; // I2S_NUM_0
+#if ESP_IDF_VERSION_MAJOR < 5
     m_i2s_config.mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
     m_i2s_config.sample_rate          = 16000;
     m_i2s_config.bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT;
     m_i2s_config.channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT;
     m_i2s_config.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB);
-    m_i2s_config.intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1; // high interrupt priority
-    m_i2s_config.dma_buf_count        = 8;      // max buffers
-    m_i2s_config.dma_buf_len          = 1024;   // max value
+    m_i2s_config.intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1;
+    m_i2s_config.dma_buf_count        = DMA_BUF_COUNT;
+    m_i2s_config.dma_buf_len          = DMA_BUF_LEN;
     m_i2s_config.use_apll             = APLL_ENABLE;
-    m_i2s_config.tx_desc_auto_clear   = true;   // new in V1.0.1
+    m_i2s_config.tx_desc_auto_clear   = true;
     m_i2s_config.fixed_mclk           = I2S_PIN_NO_CHANGE;
-
     i2s_driver_install((i2s_port_t)m_i2s_num, &m_i2s_config, 0, NULL);
+#endif
+    // IDF5: channel created lazily in setPinout()
 
     m_f_forceMono = false;
 
@@ -183,17 +184,36 @@ void AudioPlayer::initInBuff() {
     }
 }
 //---------------------------------------------------------------------------------------------------------------------
+#if ESP_IDF_VERSION_MAJOR >= 5
+esp_err_t AudioPlayer::I2Sstart() {
+    if (!m_i2s_tx_handle) return ESP_ERR_INVALID_STATE;
+    if (m_f_i2s_channel_enabled) return ESP_OK;
+    esp_err_t err = i2s_channel_enable(m_i2s_tx_handle);
+    if (err == ESP_OK) m_f_i2s_channel_enabled = true;
+    return err;
+}
+
+esp_err_t AudioPlayer::I2Sstop() {
+    if (!m_i2s_tx_handle || !m_f_i2s_channel_enabled) return ESP_OK;
+    esp_err_t err = i2s_channel_disable(m_i2s_tx_handle);
+    m_f_i2s_channel_enabled = false;
+    return err;
+}
+#else
 esp_err_t AudioPlayer::I2Sstart(uint8_t i2s_num) {
-    return i2s_start((i2s_port_t) i2s_num);
+    return i2s_start((i2s_port_t)i2s_num);
 }
 
 esp_err_t AudioPlayer::I2Sstop(uint8_t i2s_num) {
-    return i2s_stop((i2s_port_t) i2s_num);
+    return i2s_stop((i2s_port_t)i2s_num);
 }
+#endif
 //---------------------------------------------------------------------------------------------------------------------
+#if ESP_IDF_VERSION_MAJOR < 5
 esp_err_t AudioPlayer::i2s_mclk_pin_select(const uint8_t pin) {
+#ifdef CONFIG_IDF_TARGET_ESP32
     if(pin != 0 && pin != 1 && pin != 3) {
-        ESP_LOGE(TAG, "Only support GPIO0/GPIO1/GPIO3, gpio_num:%d", pin);
+        log_e("Only support GPIO0/GPIO1/GPIO3, gpio_num:%d", pin);
         return ESP_ERR_INVALID_ARG;
     }
     switch(pin){
@@ -213,17 +233,82 @@ esp_err_t AudioPlayer::i2s_mclk_pin_select(const uint8_t pin) {
             break;
     }
     return ESP_OK;
+#else
+    (void)pin;
+    log_e("i2s_mclk_pin_select not supported on this chip; pass MCLK pin to setPinout() instead");
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
+#endif // ESP_IDF_VERSION_MAJOR < 5
+//---------------------------------------------------------------------------------------------------------------------
+#if ESP_IDF_VERSION_MAJOR >= 5
+bool AudioPlayer::i2s_config() {
+    // Clean up any existing channel
+    if (m_i2s_tx_handle) {
+        I2Sstop();
+        i2s_del_channel(m_i2s_tx_handle);
+        m_i2s_tx_handle = nullptr;
+    }
+
+    memset(&m_i2s_chan_cfg, 0, sizeof(i2s_chan_config_t));
+    m_i2s_chan_cfg.id           = (i2s_port_t)m_i2s_num;
+    m_i2s_chan_cfg.role         = I2S_ROLE_MASTER;
+    m_i2s_chan_cfg.dma_desc_num  = DMA_BUF_COUNT;
+    m_i2s_chan_cfg.dma_frame_num = DMA_FRAME_NUM;
+    m_i2s_chan_cfg.auto_clear   = true;
+
+    if (i2s_new_channel(&m_i2s_chan_cfg, &m_i2s_tx_handle, NULL) != ESP_OK) {
+        log_e("i2s_new_channel failed");
+        return false;
+    }
+
+    memset(&m_i2s_std_cfg, 0, sizeof(i2s_std_config_t));
+    m_i2s_std_cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
+        I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+    m_i2s_std_cfg.gpio_cfg.bclk  = I2S_GPIO_UNUSED;
+    m_i2s_std_cfg.gpio_cfg.din   = I2S_GPIO_UNUSED;
+    m_i2s_std_cfg.gpio_cfg.dout  = I2S_GPIO_UNUSED;
+    m_i2s_std_cfg.gpio_cfg.mclk  = I2S_GPIO_UNUSED;
+    m_i2s_std_cfg.gpio_cfg.ws    = I2S_GPIO_UNUSED;
+    m_i2s_std_cfg.gpio_cfg.invert_flags.mclk_inv = false;
+    m_i2s_std_cfg.gpio_cfg.invert_flags.bclk_inv = false;
+    m_i2s_std_cfg.gpio_cfg.invert_flags.ws_inv   = false;
+    m_i2s_std_cfg.clk_cfg.sample_rate_hz = m_sampleRate;
+    m_i2s_std_cfg.clk_cfg.clk_src        = I2S_CLK_SRC_DEFAULT;
+    m_i2s_std_cfg.clk_cfg.mclk_multiple  = I2S_MCLK_MULTIPLE_256;
+
+    if (i2s_channel_init_std_mode(m_i2s_tx_handle, &m_i2s_std_cfg) != ESP_OK) {
+        log_e("i2s_channel_init_std_mode failed");
+        i2s_del_channel(m_i2s_tx_handle);
+        m_i2s_tx_handle = nullptr;
+        return false;
+    }
+    return true;
+}
+#endif // ESP_IDF_VERSION_MAJOR >= 5
 //---------------------------------------------------------------------------------------------------------------------
 AudioPlayer::~AudioPlayer() {
+#if ESP_IDF_VERSION_MAJOR >= 5
+    I2Sstop();
+    if (m_i2s_tx_handle) {
+        i2s_del_channel(m_i2s_tx_handle);
+        m_i2s_tx_handle = nullptr;
+    }
+#else
     I2Sstop(m_i2s_num);
+#endif
     InBuff.~AudioBuffer();
 }
 //---------------------------------------------------------------------------------------------------------------------
 void AudioPlayer::reset() {
     stopSong();
+#if ESP_IDF_VERSION_MAJOR >= 5
+    I2Sstop();
+    I2Sstart(); // no-op (returns ESP_ERR_INVALID_STATE) if setPinout() hasn't been called yet
+#else
     I2Sstop(0);
     I2Sstart(0);
+#endif
     initInBuff(); // initialize InputBuffer if not already done
     InBuff.resetBuffer();
     MP3Decoder_FreeBuffers();
@@ -1227,7 +1312,9 @@ void AudioPlayer::stopSong() {
     memset(m_outBuff, 0, sizeof(m_outBuff));     //Clear OutputBuffer
     if (sampleFilter != NULL)
         sampleFilter(getBitsPerSample(), m_channels, m_outBuff, m_validSamples);
-    i2s_zero_dma_buffer((i2s_port_t) m_i2s_num);
+#if ESP_IDF_VERSION_MAJOR < 5
+    i2s_zero_dma_buffer((i2s_port_t)m_i2s_num);
+#endif
 }
 //---------------------------------------------------------------------------------------------------------------------
 bool AudioPlayer::playI2Sremains() { // returns true if all dma_buffs flushed
@@ -1240,11 +1327,15 @@ bool AudioPlayer::playI2Sremains() { // returns true if all dma_buffs flushed
     else                       memset(m_outBuff, 128, sizeof(m_outBuff));     //Clear OutputBuffer (unsigned, PCM 8u)
 
     //play remains and then flush dmaBuff
-    m_validSamples = m_i2s_config.dma_buf_len;
+#if ESP_IDF_VERSION_MAJOR >= 5
+    m_validSamples = DMA_FRAME_NUM;
+#else
+    m_validSamples = DMA_BUF_LEN;
+#endif
     while(m_validSamples) {
         playChunk();
     }
-    if(dma_buf_count < m_i2s_config.dma_buf_count){
+    if(dma_buf_count < DMA_BUF_COUNT){
         dma_buf_count++;
         return false;
     }
@@ -1259,7 +1350,9 @@ bool AudioPlayer::pauseResume() {
         retVal = true;
         if(!m_f_running) {
             memset(m_outBuff, 0, sizeof(m_outBuff));               //Clear OutputBuffer
-            i2s_zero_dma_buffer((i2s_port_t) m_i2s_num);
+#if ESP_IDF_VERSION_MAJOR < 5
+            i2s_zero_dma_buffer((i2s_port_t)m_i2s_num);
+#endif
         }
     }
     return retVal;
@@ -2382,7 +2475,9 @@ int AudioPlayer::sendBytes(uint8_t* data, size_t len) {
     if(ret) { // Error, skip the frame...
         m_f_playing = false; // seek for new syncword
         if(count == 0) {
+#if ESP_IDF_VERSION_MAJOR < 5
             i2s_zero_dma_buffer((i2s_port_t)m_i2s_num);
+#endif
             if(!lastChannels && (ret == -2)) {
                  ; // suppress errorcode MAINDATA_UNDERFLOW
             }
@@ -2569,15 +2664,31 @@ void AudioPlayer::printDecodeError(int r) {
     }
 }
 //---------------------------------------------------------------------------------------------------------------------
-bool AudioPlayer::setPinout(uint8_t BCLK, uint8_t LRC, uint8_t DOUT, int8_t DIN) {
+bool AudioPlayer::setPinout(uint8_t BCLK, uint8_t LRC, uint8_t DOUT, int8_t MCLK) {
+#if ESP_IDF_VERSION_MAJOR >= 5
+    if (!i2s_config()) return false;
 
+    i2s_std_gpio_config_t gpio_cfg = {};
+    gpio_cfg.bclk = (gpio_num_t)BCLK;
+    gpio_cfg.ws   = (gpio_num_t)LRC;
+    gpio_cfg.dout = (gpio_num_t)DOUT;
+    gpio_cfg.mclk = (gpio_num_t)MCLK;
+    gpio_cfg.din  = I2S_GPIO_UNUSED;
+
+    if (i2s_channel_reconfig_std_gpio(m_i2s_tx_handle, &gpio_cfg) != ESP_OK) {
+        log_e("i2s_channel_reconfig_std_gpio failed");
+        return false;
+    }
+    return (I2Sstart() == ESP_OK);
+#else
     m_pin_config.bck_io_num   = BCLK;
-    m_pin_config.ws_io_num    = LRC; //  wclk
+    m_pin_config.ws_io_num    = LRC;
     m_pin_config.data_out_num = DOUT;
-    m_pin_config.data_in_num  = DIN;
-
-    const esp_err_t result = i2s_set_pin((i2s_port_t) m_i2s_num, &m_pin_config);
-    return (result == ESP_OK);
+    m_pin_config.data_in_num  = I2S_PIN_NO_CHANGE;
+    if (MCLK != -1)
+        log_w("MCLK pin ignored on IDF4; call i2s_mclk_pin_select() separately");
+    return (i2s_set_pin((i2s_port_t)m_i2s_num, &m_pin_config) == ESP_OK);
+#endif
 }
 //---------------------------------------------------------------------------------------------------------------------
 uint32_t AudioPlayer::getFileSize() {
@@ -2643,8 +2754,18 @@ bool AudioPlayer::audioFileSeek(const int8_t speed) {
 }
 //---------------------------------------------------------------------------------------------------------------------
 bool AudioPlayer::setSampleRate(uint32_t sampRate) {
-    i2s_set_sample_rates((i2s_port_t)m_i2s_num, sampRate);
     m_sampleRate = sampRate;
+#if ESP_IDF_VERSION_MAJOR >= 5
+    if (m_i2s_tx_handle) {
+        I2Sstop();
+        m_i2s_std_cfg.clk_cfg.sample_rate_hz = sampRate;
+        if (i2s_channel_reconfig_std_clock(m_i2s_tx_handle, &m_i2s_std_cfg.clk_cfg) != ESP_OK)
+            log_e("i2s_channel_reconfig_std_clock failed");
+        I2Sstart();
+    }
+#else
+    i2s_set_sample_rates((i2s_port_t)m_i2s_num, sampRate);
+#endif
     IIR_calculateCoefficients(); // must be recalculated after each samplerate change
     return true;
 }
@@ -2671,40 +2792,60 @@ uint8_t AudioPlayer::getChannels(){
 }
 //---------------------------------------------------------------------------------------------------------------------
 void AudioPlayer::setInternalDAC(bool internalDAC) {
-
-    m_f_internalDAC = internalDAC;
-
-    if (internalDAC)  {
-        log_i("internal DAC");
-        m_i2s_config.mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_DAC_BUILT_IN );
-        m_i2s_config.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S_MSB);
-        i2s_set_pin((i2s_port_t) m_i2s_num, NULL);
+#if ESP_IDF_VERSION_MAJOR >= 5
+    if (internalDAC) {
+        log_e("Internal DAC not supported on IDF5+ — use an external I2S DAC");
     }
-    else {  // external DAC
+#else
+    m_f_internalDAC = internalDAC;
+    if (internalDAC) {
+#ifdef CONFIG_IDF_TARGET_ESP32
+        log_i("internal DAC");
+        m_i2s_config.mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_DAC_BUILT_IN);
+        m_i2s_config.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S_MSB);
+        i2s_set_pin((i2s_port_t)m_i2s_num, NULL);
+#else
+        log_e("Internal DAC not supported on this chip");
+        return;
+#endif
+    } else {
         m_i2s_config.mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
         m_i2s_config.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB);
-        i2s_set_pin((i2s_port_t) m_i2s_num, &m_pin_config);
+        i2s_set_pin((i2s_port_t)m_i2s_num, &m_pin_config);
     }
     i2s_driver_uninstall((i2s_port_t)m_i2s_num);
-    i2s_driver_install  ((i2s_port_t)m_i2s_num, &m_i2s_config, 0, NULL);
+    i2s_driver_install((i2s_port_t)m_i2s_num, &m_i2s_config, 0, NULL);
+#endif
 }
 //---------------------------------------------------------------------------------------------------------------------
 void AudioPlayer::setI2SCommFMT_LSB(bool commFMT) {
-    // false: I2S communication format is by default I2S_COMM_FORMAT_I2S_MSB, right->left (AC101, PCM5102A)
-    // true:  changed to I2S_COMM_FORMAT_I2S_LSB for some DACs (PT8211)
-    //        Japanese or called LSBJ (Least Significant Bit Justified) format
-
+    // false: MSB / Philips mode (AC101, PCM5102A)
+    // true:  LSB / LSBJ mode (PT8211)
+#if ESP_IDF_VERSION_MAJOR >= 5
+    if (!m_i2s_tx_handle) return;
+    if (commFMT) {
+        log_i("commFMT LSB (LSBJ-slot)");
+        m_i2s_std_cfg.slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(
+            I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+    } else {
+        log_i("commFMT MSB (Philips mode)");
+        m_i2s_std_cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
+            I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+    }
+    I2Sstop();
+    i2s_channel_reconfig_std_slot(m_i2s_tx_handle, &m_i2s_std_cfg.slot_cfg);
+    I2Sstart();
+#else
     if (commFMT) {
         log_i("commFMT LSB");
         m_i2s_config.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_LSB);
-    }
-    else {
+    } else {
         log_i("commFMT MSB");
         m_i2s_config.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB);
     }
-    log_i("commFMT = %i", m_i2s_config.communication_format);
     i2s_driver_uninstall((i2s_port_t)m_i2s_num);
-    i2s_driver_install  ((i2s_port_t)m_i2s_num, &m_i2s_config, 0, NULL);
+    i2s_driver_install((i2s_port_t)m_i2s_num, &m_i2s_config, 0, NULL);
+#endif
 }
 //---------------------------------------------------------------------------------------------------------------------
 bool AudioPlayer::playSample(int16_t sample[2]) {
@@ -2715,18 +2856,26 @@ bool AudioPlayer::playSample(int16_t sample[2]) {
 
     sample = IIR_filterChain(sample);
 
-    uint32_t s32 = Gain(sample); // volume;
+    uint32_t s32 = Gain(sample); // volume
 
-    if(m_f_internalDAC) {
-        s32 += 0x80008000;
+#if ESP_IDF_VERSION_MAJOR >= 5
+    if (!m_i2s_tx_handle) return false;
+    esp_err_t err = i2s_channel_write(m_i2s_tx_handle, &s32, sizeof(uint32_t), &m_i2s_bytesWritten, 1000);
+    if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+        log_e("i2s_channel_write error %i", err);
+        return false;
     }
-
-    esp_err_t err = i2s_write((i2s_port_t) m_i2s_num, (const char*) &s32, sizeof(uint32_t), &m_i2s_bytesWritten, 1000);
-    if(err != ESP_OK) {
+#else
+#ifdef CONFIG_IDF_TARGET_ESP32
+    if (m_f_internalDAC) s32 += 0x80008000;
+#endif
+    esp_err_t err = i2s_write((i2s_port_t)m_i2s_num, (const char*)&s32, sizeof(uint32_t), &m_i2s_bytesWritten, 1000);
+    if (err != ESP_OK) {
         log_e("ESP32 Errorcode %i", err);
         return false;
     }
-    if(m_i2s_bytesWritten < 4) {
+#endif
+    if (m_i2s_bytesWritten < 4) {
         log_e("Can't stuff any more in I2S..."); // increase waitingtime or outputbuffer
         return false;
     }

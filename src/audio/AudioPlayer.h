@@ -21,8 +21,14 @@
 #include "SPIFFS.h"
 #include "FS.h"
 #include "FFat.h"
+#include "WiFiClient.h"
 #include "WiFiClientSecure.h"
+#include "esp_idf_version.h"
+#if ESP_IDF_VERSION_MAJOR >= 5
+#include "driver/i2s_std.h"
+#else
 #include "driver/i2s.h"
+#endif
 
 // extern __attribute__((weak)) void audio_info(const char*);
 // extern __attribute__((weak)) void audio_id3data(const char*); //ID3 metadata
@@ -141,7 +147,7 @@ public:
      * @return true if audio file active and speed is valid, otherwise false
      */
     bool audioFileSeek(const int8_t speed);
-    bool setPinout(uint8_t BCLK, uint8_t LRC, uint8_t DOUT, int8_t DIN=I2S_PIN_NO_CHANGE);
+    bool setPinout(uint8_t BCLK, uint8_t LRC, uint8_t DOUT, int8_t MCLK=-1);
     void stopSong();
     /**
      * @brief pauseResume pauses current playback 
@@ -160,7 +166,9 @@ public:
     bool isNullStream() {return m_f_nullstream;}
     bool isLocalFile() {return m_f_localfile;}
     bool isWebStream() {return m_f_webstream;}
+#if ESP_IDF_VERSION_MAJOR < 5
     esp_err_t i2s_mclk_pin_select(const uint8_t pin);
+#endif
     uint32_t inBufferFilled(); // returns the number of stored bytes in the inputbuffer
     uint32_t inBufferFree();   // returns the number of free bytes in the inputbuffer
     void setTone(uint8_t l_type = 0, uint16_t l_freq = 0, uint8_t r_type = 0, uint16_t r_freq = 0);
@@ -197,8 +205,14 @@ private:
     void parseAudioHeader(const char* ah);
     bool parseContentType(const char* ct);
     void processControlData(uint8_t b);
+#if ESP_IDF_VERSION_MAJOR >= 5
+    bool      i2s_config();
+    esp_err_t I2Sstart();
+    esp_err_t I2Sstop();
+#else
     esp_err_t I2Sstart(uint8_t i2s_num);
     esp_err_t I2Sstop(uint8_t i2s_num);
+#endif
     String urlencode(String str);
     int16_t* IIR_filterChain(int16_t iir_in[2], bool clear = false);
     void IIR_calculateCoefficients();
@@ -259,8 +273,17 @@ private:
     virtual void audio_eof_stream(const char*) {}
 
 private:
+    static constexpr uint16_t DMA_BUF_COUNT = 8;
+    static constexpr uint16_t DMA_BUF_LEN   = 1024;
+#if ESP_IDF_VERSION_MAJOR >= 5
+    // IDF5 limit: dma_frame_num × channels × bit_width/8 ≤ 4092
+    // 512 × 2 × 2 = 2048 bytes — safe; 1024 × 2 × 2 = 4096 — exceeds limit
+    static constexpr uint16_t DMA_FRAME_NUM = 512;
+#endif
+#if ESP_IDF_VERSION_MAJOR < 5
     enum : int { APLL_AUTO = -1, APLL_ENABLE = 1, APLL_DISABLE = 0 };
     enum : int { EXTERNAL_I2S = 0, INTERNAL_DAC = 1, INTERNAL_PDM = 2 };
+#endif
     enum : int { CODEC_NONE = 0, CODEC_WAV = 1, CODEC_MP3 = 2, CODEC_AAC = 4, CODEC_M4A = 5};
     enum : int { FORMAT_NONE = 0, FORMAT_M3U = 1, FORMAT_PLS = 2, FORMAT_ASX = 3};
     enum : int { AUDIO_NONE, AUDIO_HEADER , AUDIO_DATA, AUDIO_METADATA, AUDIO_PLAYLISTINIT,
@@ -281,8 +304,14 @@ private:
     File              audiofile;    // @suppress("Abstract class cannot be instantiated")
     WiFiClient        client;       // @suppress("Abstract class cannot be instantiated")
     WiFiClientSecure  clientsecure; // @suppress("Abstract class cannot be instantiated")
-    i2s_config_t      m_i2s_config; // stores values for I2S driver
+#if ESP_IDF_VERSION_MAJOR >= 5
+    i2s_chan_handle_t m_i2s_tx_handle = {};
+    i2s_chan_config_t m_i2s_chan_cfg  = {};
+    i2s_std_config_t  m_i2s_std_cfg  = {};
+#else
+    i2s_config_t      m_i2s_config;
     i2s_pin_config_t  m_pin_config;
+#endif
     AudioSampleFilter sampleFilter = NULL;
     unsigned          dummy = 0;
 
@@ -306,7 +335,12 @@ private:
     uint8_t         m_vol=64;                       // volume
     uint8_t         m_bitsPerSample = 16;           // bitsPerSample
     uint8_t         m_channels=2;
-    uint8_t         m_i2s_num = I2S_NUM_0;          // I2S_NUM_0 or I2S_NUM_1
+    uint8_t         m_i2s_num = 0;                   // I2S port number (I2S_NUM_0 or I2S_NUM_1)
+#if ESP_IDF_VERSION_MAJOR >= 5
+    bool            m_f_i2s_channel_enabled = false;
+#else
+    bool            m_f_internalDAC = false;
+#endif
     uint8_t         m_playlistFormat = 0;           // M3U, PLS, ASX
     uint8_t         m_codec = CODEC_NONE;           //
     uint8_t         m_filterType[2];                // lowpass, highpass
@@ -341,7 +375,6 @@ private:
     bool            m_f_psram = false;              // set if PSRAM is availabe
     bool            m_f_loop = false;               // Set if audio file should loop
     bool            m_f_forceMono = false;          // if true stereo -> mono
-    bool            m_f_internalDAC = false;        // false: output vis I2S, true output via internal DAC
     uint32_t        m_audioFileDuration = 0;
     float           m_audioCurrentTime = 0;
     float           m_filterBuff[2][2][2];          // IIR filters memory for Audio DSP
