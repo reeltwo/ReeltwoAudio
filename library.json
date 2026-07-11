@@ -1,6 +1,6 @@
 {
   "name": "ReeltwoAudio",
-  "version": "23.5.6",
+  "version": "23.5.7",
   "description": "Modular RSeries Astromech Audio Firmware",
   "keywords": ["audio", "i2s", "esp32", "mp3", "aac"],
   "authors": [
@@ -16,15 +16,5 @@
   "platforms": "espressif32",
   "build": {
     "srcDir": "src"
-  },
-  "dependencies": [
-    {"name": "SPI"},
-    {"name": "SD"},
-    {"name": "SD_MMC"},
-    {"name": "FS"},
-    {"name": "SPIFFS"},
-    {"name": "FFat"},
-    {"name": "WiFi"},
-    {"name": "WiFiClientSecure"}
-  ]
+  }
 }
